@@ -1,0 +1,9 @@
+.DS_Store
+*.dylib
+# Network captures contain Steam/PlayFab session tokens — never commit them.
+*.har
+*.proxymansession
+*.log
+# Extracted game binaries (copyrighted; regenerate locally with lipo).
+nms_arm64
+*.thin
