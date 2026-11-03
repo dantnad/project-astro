@@ -73,13 +73,43 @@ static int chat_controls_created;
 // assumes a chat control already exists, skips creating one, and every later
 // PartyNetworkConnectChatControl fails (error 6) -> the game leaves every lobby.
 // The game passes &this->localUser (this+0x2c0) here, so the handle is the next slot. We clear it, but only
-// when called from that exact site in the 4.70 build and before any real chat control exists.
-#define NMS_470_CREATE_LOCAL_USER_RET_OFFSET 0x9c7c4ULL  // 0x10009c7c4 minus the 0x100000000 image base
+// when the call really comes from OnPlayfabTokenRetrieved() and before any real chat control exists.
+//
+// That function holds the game's only call to PartyCreateLocalUser, and the game exports its mangled C++
+// symbol, so we resolve it at runtime rather than hardcoding a file offset. A hardcoded offset stops
+// matching the moment Steam patches the binary, which is what happened on 2026-11-02 (build 26386568,
+// still version 4.70): the call site moved from 0x9c7c4 to 0x9cf88 and the fix silently did nothing.
+#define NMS_TOKEN_RETRIEVED_SYM "_ZN21cGcMatchmakingPlayfab23OnPlayfabTokenRetrievedEv"
+#define NMS_TOKEN_RETRIEVED_MAX_SIZE 0x1000ULL  // actual size is ~0x2b4; generous room for future patches
 
+static void *token_retrieved_fn(void) {
+    static void *fn;
+    static int resolved;
+    if (!resolved) {
+        resolved = 1;
+        fn = dlsym(RTLD_DEFAULT, NMS_TOKEN_RETRIEVED_SYM);
+        if (!fn) logmsg("fix: symbol %s not found (different game build?)", NMS_TOKEN_RETRIEVED_SYM);
+    }
+    return fn;
+}
+
+// True when ret is a return address just past a BL inside OnPlayfabTokenRetrieved().
 static int called_from_token_retrieved(void *ret) {
-    Dl_info info;
-    if (!dladdr(ret, &info) || !info.dli_fname || !strstr(info.dli_fname, "/MacOS/No Man's Sky")) return 0;
-    return (uintptr_t)ret - (uintptr_t)info.dli_fbase == NMS_470_CREATE_LOCAL_USER_RET_OFFSET;
+    void *fn = token_retrieved_fn();
+    if (!fn) return 0;
+    uintptr_t off = (uintptr_t)ret - (uintptr_t)fn;
+    if (off < 4 || off >= NMS_TOKEN_RETRIEVED_MAX_SIZE) {
+        logmsg("fix: return address %p is +%#lx from OnPlayfabTokenRetrieved() at %p, outside it",
+               ret, (unsigned long)off, fn);
+        return 0;
+    }
+    uint32_t prev;
+    memcpy(&prev, (const char *)ret - 4, sizeof prev);
+    if ((prev >> 26) != 0x25) {  // ARM64 BL
+        logmsg("fix: instruction before %p is not a BL (0x%08x)", ret, prev);
+        return 0;
+    }
+    return 1;
 }
 
 static PartyError my_PartyCreateLocalUser(H handle, PartyString entityId, PartyString token, H *user) {

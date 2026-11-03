@@ -5,8 +5,9 @@ you never run into other travelers), even with multiplayer enabled and even thou
 other devices, this might be your fix.
 
 > **This is not an official Hello Games fix.** It's a community workaround for a bug in the Mac version,
-> tested on No Man's Sky **4.70** (Steam, Apple Silicon). Use it at your own risk, and stop using it once
-> the game is patched.
+> tested on No Man's Sky **4.70** (Steam, Apple Silicon). Hello Games patches the binary without changing
+> that version string, so the fix identifies the code it patches by symbol rather than by address. Use it
+> at your own risk, and stop using it once the game is patched.
 
 ## What's actually wrong
 
@@ -80,9 +81,10 @@ PartyNetworkConnectChatControl(...) -> 0 OK
 
 - **`fix: chat-control handle before = …`**: it found and cleared the bad value. 🎉
   If the value shown is `0x0`, the memory was clean this time and the game would have been fine anyway.
-- **`fix: skipped, unexpected call site`**: the game has been updated and the code moved. The fix
-  deliberately does nothing in that case instead of guessing. Try playing normally from Steam first; the
-  bug may be fixed. If it isn't, the fix needs updating for the new version.
+- **`fix: skipped, unexpected call site`** (with a line above it saying why): the game has been updated
+  and the code the fix looks for is gone. It deliberately does nothing in that case instead of guessing.
+  Try playing normally from Steam first; the bug may be fixed. If it isn't, the fix needs updating for the
+  new version.
 
 Want to see the bug with your own eyes? Run `NMS_SHIM_NOFIX=1 ./nms-party-shim/launch.sh`. The log will show
 `PartyNetworkConnectChatControl(... chat=<garbage>) -> 6 failed to find specified resource` every few

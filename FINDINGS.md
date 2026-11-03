@@ -19,7 +19,8 @@ same account from other devices, never from the Mac.
 8. [The launch method matters](#8-the-launch-method-matters)
 9. [Catch the garbage value](#9-catch-the-garbage-value)
 10. [Fix it and confirm](#10-fix-it-and-confirm)
-11. [Tips and gotchas](#tips-and-gotchas)
+11. [A patch that moved the code, without changing the version](#11-a-patch-that-moved-the-code-without-changing-the-version)
+12. [Tips and gotchas](#tips-and-gotchas)
 
 ## 1. Rule out the usual suspects
 
@@ -223,9 +224,11 @@ The game passes `&this->localUser` (`this+0x2c0`) to `PartyCreateLocalUser`, and
 very next 8 bytes. So the injected library clears that slot right after `PartyCreateLocalUser` succeeds.
 Two guards keep it from ever touching anything else:
 
-1. It only acts when the call comes from that exact spot in `OnPlayfabTokenRetrieved()`, checked via
-   `dladdr` on the return address (offset `0x9c7c4` in the 4.70 binary). After a game update it logs
-   "skipped" and does nothing.
+1. It only acts when the call comes from inside `OnPlayfabTokenRetrieved()`. That function holds the
+   binary's only call to `PartyCreateLocalUser`, and the game exports its mangled C++ symbol, so the check
+   is `dlsym(RTLD_DEFAULT, "_ZN21cGcMatchmakingPlayfab23OnPlayfabTokenRetrievedEv")` plus a bounds test on
+   the return address and a check that the instruction before it really is a `BL`. If the symbol is gone or
+   the return address lands elsewhere, it logs why and does nothing.
 2. It only acts if no real chat control has been created yet in this run.
 
 In the launch mode that had just failed:
@@ -246,6 +249,43 @@ Then an A/B test in-game, same launcher, same session:
 The proper fix in the game is one line: initialize that member to `nullptr` in the constructor. Treating a
 failed voice-chat connection as non-fatal would make it more robust too, since voice chat is optional.
 
+## 11. A patch that moved the code, without changing the version
+
+The fix above was built against the build installed on 2026-10-16 (`BuildID 25732212`). Steam then pushed
+three more updates — `26276708` and `26305319` on 2026-10-29, `26386568` on 2026-11-02 (21 files) — and
+`CFBundleShortVersionString` stayed **4.70** through all of them. By the 2026-11-02 build the fix had
+stopped working, silently and correctly: it logged `fix: skipped, unexpected call site 0x…f88` and left the
+game alone, so every lobby went back to `PartyNetworkConnectChatControl(chat=0x4) -> 6` and
+`LeaveNetworkCalled`.
+
+It moved more than once. A report from another player on 2026-10-30, against the 2026-10-29 build, shows
+`fix: skipped, unexpected call site 0x10272cf70` — offset `…f70`, where this build gives `…f88`. ASLR slides
+the main executable by whole pages (`0x4000`), so those low bits are the real offset and a `0x18` difference
+is a real move, two patches in four days. That report was closed as working, which is the other hazard: a
+skipped fix is indistinguishable from a working one unless you read the log, because roughly one launch in
+thirteen gets clean memory anyway.
+
+The bug itself was untouched. Only the code had moved. In build `26386568`,
+`cGcMatchmakingPlayfab::OnPlayfabTokenRetrieved()` starts at `0x10009ce3c` and its call to
+`PartyCreateLocalUser` returns to `0x10009cf88` — so the shim's hardcoded `0x9c7c4` now lands in
+`GetPlayfabToken()+0xc0` and the guard rejected every launch. The member layout was unchanged:
+`localUser` at `this+0x2c0`, `chatControl` at `this+0x2c8`, still never initialized.
+
+Finding the new offset is a three-step check that's worth repeating after any update:
+
+```bash
+lipo -thin arm64 "No Man's Sky.app/Contents/MacOS/No Man's Sky" -output nms_arm64
+nm -arch arm64 -C nms_arm64 | grep OnPlayfabTokenRetrieved
+lldb -b -o "target create --arch arm64 nms_arm64" \
+     -o "disassemble --start-address 0x10009ce3c --end-address 0x10009d0f0"
+```
+
+A scan of every `BL` in `__text` confirmed the binary has exactly **one** call to `PartyCreateLocalUser`,
+which is what makes the guard cheap: the shim no longer hardcodes an offset at all. It resolves
+`OnPlayfabTokenRetrieved` by symbol with `dlsym` (it's in the export trie, so `dlsym` finds it in the main
+executable) and accepts any return address inside that function that follows a `BL`. That survives code
+moving around, and still refuses to fire if the function disappears.
+
 ## Tips and gotchas
 
 - **zsh's builtin `log` shadows macOS's `/usr/bin/log`.** `log show …` in zsh silently prints nothing.
@@ -259,3 +299,10 @@ failed voice-chat connection as non-fatal would make it more robust too, since v
   as pressing Play.
 - **Universal binaries:** extract the arm64 slice with `lipo` before computing file offsets, or every
   address will be wrong.
+- **Don't hardcode code offsets when a symbol will do.** This binary keeps its C++ symbols and exports
+  them, so `dlsym` beats a baked-in offset that a patch can invalidate without changing the version string.
+- **The version string doesn't track the build.** `CFBundleShortVersionString` stayed at 4.70 across a
+  patch that moved code. `grep buildid ~/Library/Application\ Support/Steam/steamapps/appmanifest_275850.acf`
+  and `~/Library/Application Support/Steam/logs/content_log.txt` are the honest record of what changed and when.
+- **`llvm-objdump`'s `--start-address` is ignored** on this binary; `lldb -b -o "disassemble --start-address …"`
+  works and is fast enough even at 100 MB.
